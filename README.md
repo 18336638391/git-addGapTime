@@ -1,289 +1,301 @@
-#git-add.GapTime
-导入日期时间
-导入作业
-导入日志记录
-导入hashlib
-导入json
-导入pkg_resources
-导入子流程
-导入re
-导入ast
-导入时间
+
+导入操作系统
 导入系统
-将语音识别作为sr导入(_A)
-导入PyAutoGUI
-导入请求
-从mss导入mss
-从PIL导入图像
-导入pytesseract
-从concurrent.futures导入ThreadPoolExecutor，as_completed
-导入configparser
-从微调器导入微调器
-将tkinter导入为tk
-从tkinter导入消息框
+导入时间
+导入线程
+导入回溯
+导入子流程
+导入日期时间
+从集合导入退出
+将numpy导入为np
+从键入导入Dict，Any
+进口火炬
+从变压器导入GPT2LMHeadModel、GPT2Tokenizer、管道
 
-# 配置日志记录
-logging.basicConfig(level=logging.INFO，格式=“%(actime)s-%(levelName)s-%(message)s”)
+#========== 全局配置 ==========
+类配置：
+app_NAME="GapTimeLLM"
+log_DIR="./logs"
+temp_DIR="./temp"
+Max_RESTARTS=5
+restart_DELAY=10
+event_HISTORY_SIZE=100
+LLM_MODEL="gpt2-medium"#可替换为本地模型路径
+time_DIM=128
+feedback_LOG=os.path.join(LOG_DIR，"user_feedback.log")
+upgrade_TRIGGER_INTERVAL=3600#每小时检查升级
+code_TEMPLATE_PATH="gap_time_template.py"
+command_TIMEOUT=20
+# 新增训练相关配置
+training_DATA_PATH=os.path.join(TEMP_DIR，"training_data.csv")
+learning_RATE=5e-5
+training_epochs=10
+min_TRAINING_SAMPLES=50#最小训练样本数
+auto_TRAIN_INTERVAL=3600#自动训练间隔（秒）
 
-# 尝试安装缺失的依赖库
-required_packages=[
-'scikit-learn'，
-'语音识别'，
-'网络插座'，
-'Beautifulsoup4'，
-'请求'，
-'spinner'，
-'MSS'，
-'pyautogui'，
-'pyteesseract'，
-'tkinter'
-]
-#修正依赖名称：移除多余空格
-required_packages=[pkg.replace(”，")用于pkg的required_packages]
+#========== 大语言模型核心 ==========
+类GapTimeLLM：
+定义__init__(自身，记录器)：
+self.logger=记录器
+self.device="cuda"(如果是火炬)。cuda.is_available()else"cpu"
+self.model=GPT2LMHeadModel.From_pretrained(配置LLM_MODEL).To(self.设备)
+self.tokenizer=GPT2Tokenizer.From_pretrained(配置LLM_MODEL)
+self.model.eval()#初始推理模式
+self.last_train_time=0#记录最后训练时间
 
-installed_packages={pkg_resources.working_set中的pkg的pkg.key}
-缺少包(_P)=[pkg(如果pkg不在installed_packages中，则为required_packages中的pkg)]
+    Def generate_response(self，提示符：str，max_length=512)：
+    """核心文本生成"""
+    输入=self.tokenizer(提示，return_tensors="pt").to(self.device)
+    输出=自模型生成(**输入，max_length=max_length，num_beams=5)
+    返回self.tokenizer.decode(输出[0]，skip_special_tokenes=True)
 
-如果缺少包(_P)：
-对于missing packages中的封装(_P)：
-尝试：
-子流程.check_call([sys.executable，"-m"，"pip"，"install"，pkg])
-logging.INFO(f"成功安装{pkg}")
-子流程除外。CalledProcessError为e：
-logging.error(f"安装{pkg}失败。错误：{e}")
+    Def切换至培训模式(自)：
+    """切换训练模式"""
+    self.model.train()
+    self.logger.log("模型进入训练模式"，"信息")
 
-# 读取配置文件
-如果不存在os.path.('config.ini')：
-logging.error('config.ini文件不存在，请检查配置文件')
-raise FileNotFoundError('config.ini文件不存在')
+    Def切换至推理模式(自身)：
+    """切换推理模式"""
+    self.model.eval()
+    self.logger.log("模型进入推理模式"，"信息")
 
-config=configparser.ConfigParser()
-config.read('config.ini')
-network_url=config.get('network'，'url'，fallback='http://your-server-url/control')
-browser_path=config.get('automation'，'browser_path'，fallback=")
+    定义保存模型(self，路径：str)(_M)：
+    """保存训练后模型"""
+    self.model.save_pretrained(路径)
+    self.tokenizer.save_pretrained(路径)
+        self.logger.log(f"模型保存至 {path}", "INFO")
 
-# 语音识别函数
-Def recognize_speech()：
-识别器=sr.Recognizer()
-以sr.Microphone()为源：
-logging.INFO("请说话...")
-尝试：
-带微调器()：
-音频=识别器.listen(源，短语时间限制=5)
-尝试：
-command=recognizer.ognize_google(音频，语言='zh-CN'，超时=5)
-logging.INFO(f"识别的语音命令：{command}")
-                return command
-            except sr.WaitTimeoutError:
-                logging.error("语音识别网络请求超时")
-        except sr.UnknownValueError as e:
-            logging.error(f"语音识别错误: {e}")
-        except sr.RequestError as e:
-            logging.error(f"请求错误: {e}")
-    return None
+# ========== 深度训练引擎 ==========
+class TrainingEngine:
+    def __init__(self, logger: Logger, llm: GapTimeLLM):
+        self.logger = logger
+        self.llm = llm
+        self.optimizer = torch.optim.AdamW(llm.model.parameters(), lr=Config.LEARNING_RATE)
+        self.data_buffer = []  # 训练数据缓冲区
 
-# 从标准输入获取文字命令
-def get_text_command():
-    command = input("请输入命令（或直接回车跳过）：").strip()
-    if command:
-        logging.info(f"输入的文字命令: {command}")
-        return command
-    return None
+    def add_training_sample(self, prompt: str, response: str):
+        """添加训练样本"""
+        self.data_buffer.append((prompt, response))
+        self.logger.log(f"新增训练样本（总数:{len(self.data_buffer)}）", "DEBUG")
 
-# 屏幕监控函数
-def capture_screen():
-    try:
-        with mss() as sct:
-            monitor = sct.monitors[1]
-            sct_img = sct.grab(monitor)
-            if not sct_img:
-                raise Exception("未能成功获取屏幕截图")
-            output = 'capture.png'
-            img = Image.frombytes('RGB', sct_img.size, sct_img.bgra, 'raw', 'BGRX')
-            img.save(output)
-            logging.info(f"屏幕截图已保存为 {output}")
-            return output
-    except Exception as e:
-        logging.error(f"屏幕截图出错: {e}")
-        return None
+    def has_enough_data(self) -> bool:
+        """检查是否达到最小训练样本"""
+        return len(self.data_buffer) >= Config.MIN_TRAINING_SAMPLES
 
-# 从截图中提取文字
-def extract_text_from_screenshot(screenshot_path):
-    if not screenshot_path:
-        return ""
-    try:
-        text = pytesseract.image_to_string(Image.open(screenshot_path), lang='chi_sim')
-        return text
-    except FileNotFoundError:
-        logging.error(f"截图文件 {screenshot_path} 未找到")
-        return ""
-    except Exception as e:
-        logging.error(f"从截图提取文字出错: {e}")
-        return ""
-
-# 模拟自动化搜索操作
-# 这里暂未替换为 selenium，仅对现有逻辑添加更多错误处理
-def automate_search(command):
-    browser = config.get('automation', 'browser', fallback='chrome')
-    if "搜索" in command:
-        search_term = command.split("搜索")[1].strip()
-        try:
-            url = f"https://www.baidu.com/s?wd={search_term}"
-            if browser == 'chrome':
-                if browser_path:
-                    pyautogui.hotkey('win', 'r')
-                    time.sleep(1)
-                    if not pyautogui.getActiveWindowTitle():
-                        raise Exception("无法激活运行窗口")
-                    pyautogui.typewrite(browser_path + " " + url)
-                    pyautogui.press('enter')
-                    logging.info(f"使用 Chrome 浏览器搜索 {search_term}")
-                else:
-                    pyautogui.hotkey('win', 'r')
-                    time.sleep(1)
-                    if not pyautogui.getActiveWindowTitle():
-                        raise Exception("无法激活运行窗口")
-                    pyautogui.typewrite('chrome ' + url)
-                    pyautogui.press('enter')
-                    logging.info(f"使用默认 Chrome 路径搜索 {search_term}")
-            elif browser == 'firefox':
-                if browser_path:
-                    pyautogui.hotkey('win', 'r')
-                    time.sleep(1)
-                    if not pyautogui.getActiveWindowTitle():
-                        raise Exception("无法激活运行窗口")
-                    pyautogui.typewrite(browser_path + " " + url)
-                    pyautogui.press('enter')
-                    logging.info(f"使用 Firefox 浏览器搜索 {search_term}")
-                else:
-                    pyautogui.hotkey('win', 'r')
-                    time.sleep(1)
-                    if not pyautogui.getActiveWindowTitle():
-                        raise Exception("无法激活运行窗口")
-                    pyautogui.typewrite('firefox ' + url)
-                    pyautogui.press('enter')
-                    logging.info(f"使用默认 Firefox 路径搜索 {search_term}")
-            # 可以添加更多浏览器的支持
-        except pyautogui.FailSafeException as e:
-            logging.warning(f"自动化操作因触发安全机制停止: {e}")
-        except Exception as e:
-            logging.error(f"自动化搜索出错: {e}")
-
-# 网络操作控制函数
-def network_operation():
-    max_retries = 3
-    retry_delay = 5
-    for attempt in range(max_retries):
-        try:
-            response = requests.get(network_url, timeout=10)
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    if not isinstance(data, dict):
-                        raise ValueError("返回的数据格式不符合预期，应为字典类型")
-                    logging.info(f"从网络获取的数据: {data}")
-                    return data
-                except json.JSONDecodeError as e:
-                    logging.error(f"解析网络响应的JSON出错: {e}")
-                    return None
-            else:
-                logging.error(f"网络请求失败，状态码: {response.status_code}")
-        except requests.RequestException as e:
-            logging.error(f"网络操作出错: {e}")
-            if attempt < max_retries - 1:
-                logging.info(f"重试 {attempt + 1}，等待 {retry_delay} 秒...")
-                time.sleep(retry_delay)
-            else:
-                logging.error("达到最大重试次数，停止重试")
-    return None
-
-# GapTime AI模型类
-class GapTimeAI:
-    def __init__(self):
-        self.model = None
-
-    def train_and_save(self):
-        # 这里可以根据实际需求改进训练数据的收集
-        screenshot_path = capture_screen()
-        text = extract_text_from_screenshot(screenshot_path)
-        X = [text]
-        y = [0]  # 简单示例标签，实际应用中应更丰富
-        try:
-            from sklearn.model_selection import train_test_split
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            from sklearn.naive_bayes import MultinomialNB
-            from sklearn.pipeline import make_pipeline
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-            self.model = make_pipeline(TfidfVectorizer(), MultinomialNB())
-            self.model.fit(X_train, y_train)
-            joblib.dump(self.model, 'model.pkl')
-            logging.info("GapTime AI模型训练并保存成功")
-        except Exception as e:
-            logging.error(f"GapTime AI模型数据收集与训练出错: {e}")
-
-    def predict(self, text):
-        if self.model:
-            try:
-                prediction = self.model.predict([text])
-                return prediction[0] if prediction.size > 0 else None
-            except Exception as e:
-                logging.error(f"预测出错: {e}")
-                return None
-        else:
-            logging.error("模型未训练，无法进行预测")
-            return None
-
-# 界面操作函数
-def add_button(root):
-    try:
-        new_button = tk.Button(root, text="新按钮", command=lambda: messagebox.showinfo("提示", "新按钮被点击"))
-        new_button.pack()
-        logging.info("成功添加新按钮")
-    except Exception as e:
-        logging.error(f"添加按钮出错: {e}")
-
-# 操作映射字典
-operation_mapping = {
-    "搜索": automate_search,
-    "添加按钮": add_button
-}
-
-# 主循环
-def main_loop():
-    root = tk.Tk()
-    root.title("AI桌面交互程序")
-    gap_time_ai = GapTimeAI()
-    gap_time_ai.train_and_save()
-
-    def process_command(command):
-        if not command:
+    def run_training_loop(self):
+        """完整训练流程"""
+        if not self.has_enough_data():
+            self.logger.log(f"训练数据不足（需要{Config.MIN_TRAINING_SAMPLES}，当前{len(self.data_buffer)}）", "WARNING")
             return
-        prediction = gap_time_ai.predict(command)
-        # 遍历映射，根据关键词执行对应的函数
-        for key, func in operation_mapping.items():
-            # 使用正确的单词边界匹配关键字
-            if re.search(r'{}'.format(re.escape(key)), command):
-                if key == "添加按钮":
-                    func(root)
+
+        self.llm.switch_to_training_mode()
+        self.logger.log(f"开始模型训练（轮次:{Config.TRAINING_EPOCHS}）", "INFO")
+
+        for epoch in range(Config.TRAINING_EPOCHS):
+            total_loss = 0.0
+            for prompt, label in self.data_buffer:
+                inputs = self.llm.tokenizer(prompt, return_tensors="pt").to(self.llm.device)
+                labels_inputs = self.llm.tokenizer(label, return_tensors="pt").to(self.llm.device)
+                
+                outputs = self.llm.model(**inputs, labels=labels_inputs["input_ids"])
+                loss = outputs.loss
+                total_loss += loss.item()
+                
+                loss.backward()
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+
+            self.logger.log(f"Epoch {epoch+1} 损失: {total_loss/len(self.data_buffer):.4f}", "INFO")
+
+        self.llm.switch_to_inference_mode()
+        self.llm.last_train_time = time.time()
+        self.llm.save_model(os.path.join(Config.TEMP_DIR, "fine_tuned_model"))
+        self.data_buffer.clear()  # 清空已训练数据
+        self.logger.log("训练完成，模型已保存", "INFO")
+
+# ========== 任务执行系统 ==========
+class TaskExecutor:
+    def __init__(self, logger: Logger, llm: GapTimeLLM):
+        self.logger = logger
+        self.llm = llm
+
+    def execute_task(self, task: str):
+        """智能任务执行（支持命令/文本生成）"""
+        if task.startswith("system:"):  # 系统命令
+            cmd = task[7:].strip()
+            return self.execute_system_command(cmd)
+        else:  # 文本生成任务
+            return self.llm.generate_response(task)
+
+    def execute_system_command(self, command: str):
+        """安全执行系统命令"""
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=Config.COMMAND_TIMEOUT
+            )
+            if result.returncode == 0:
+                return f"命令执行成功:\n{result.stdout}"
+            else:
+                return f"命令执行失败:\n{result.stderr}"
+        except Exception as e:
+            return f"命令执行异常: {str(e)}"
+
+# ========== 自主决策核心 ==========
+class AutonomousCore:
+    def __init__(self, logger: Logger, llm: GapTimeLLM, training_engine: TrainingEngine):
+        self.logger = logger
+        self.llm = llm
+        self.training_engine = training_engine
+        self.event_history = deque(maxlen=Config.EVENT_HISTORY_SIZE)
+        self.user_commands = deque()
+
+    def record_user_command(self, command: str):
+        """记录用户命令用于训练"""
+        response = self.llm.generate_response(f"处理命令: {command}")
+        self.training_engine.add_training_sample(command, response)
+        self.event_history.append(f"命令: {command} → 响应: {response[:50]}...")
+
+    def trigger_auto_train(self):
+        """定时自动训练触发"""
+        if (time.time() - self.llm.last_train_time) > Config.AUTO_TRAIN_INTERVAL:
+            self.logger.log("触发定时自动训练", "INFO")
+            self.training_engine.run_training_loop()
+
+    def analyze_event_history(self):
+        """深度事件分析（示例：提取高频命令）"""
+        command_counts = {}
+        for event in self.event_history:
+            if "命令:" in event:
+                cmd = event.split("命令: ")[1].split(" → ")[0]
+                command_counts[cmd] = command_counts.get(cmd, 0) + 1
+        if command_counts:
+            self.logger.log(f"高频命令: {max(command_counts, key=command_counts.get)}", "DEBUG")
+
+# ========== 主控AI程序核心 ==========
+class GapTimeController:
+    def __init__(self):
+        self.logger = Logger()
+        self.llm = GapTimeLLM(self.logger)
+        self.training_engine = TrainingEngine(self.logger, self.llm)
+        self.task_executor = TaskExecutor(self.logger, self.llm)
+        self.autonomous_core = AutonomousCore(self.logger, self.llm, self.training_engine)
+        self.running = False
+        self.init_environment()
+
+    def init_environment(self):
+        """初始化环境"""
+        os.makedirs(Config.LOG_DIR, exist_ok=True)
+        os.makedirs(Config.TEMP_DIR, exist_ok=True)
+        # 加载历史训练模型（如有）
+        model_path = os.path.join(Config.TEMP_DIR, "fine_tuned_model")
+        if os.path.exists(model_path):
+            self.llm.model = GPT2LMHeadModel.from_pretrained(model_path).to(self.llm.device)
+            self.logger.log("加载上次训练的模型", "INFO")
+
+    def start_autonomous_mode(self):
+        """启动自主运行模式"""
+        if self.running:
+            self.logger.log("自主模式已运行", "INFO")
+            return
+        self.running = True
+        threading.Thread(target=self.autonomous_loop, daemon=True).start()
+        self.logger.log("自主模式启动", "INFO")
+
+    def autonomous_loop(self):
+        """包含自我迭代的主循环"""
+        while self.running:
+            try:
+                self.autonomous_core.analyze_event_history()
+                self.autonomous_core.trigger_auto_train()
+                time.sleep(60)  # 每分钟执行一次自主逻辑
+            except Exception as e:
+                self.logger.log(f"自主循环异常: {str(e)}", "ERROR")
+                traceback.print_exc()
+
+    def handle_user_command(self, command: str):
+        """全功能命令处理"""
+        self.autonomous_core.record_user_command(command)
+        
+        if command.startswith("train now"):
+            self.training_engine.run_training_loop()
+        elif command.startswith("execute "):
+            task = command[8:]
+            result = self.task_executor.execute_task(task)
+            self.logger.log(f"任务结果: {result[:100]}...", "INFO")
+            print(result)
+        elif command == "status":
+            self.print_status()
+        else:
+            response = self.llm.generate_response(f"用户命令: {command}")
+            print(f"AI响应: {response[:200]}...")
+
+    def print_status(self):
+        """显示系统状态"""
+        print(f"模型状态: {'训练中' if self.llm.model.training else '推理中'}")
+        print(f"训练数据: {len(self.training_engine.data_buffer)}/{Config.MIN_TRAINING_SAMPLES}")
+        print(f"最后训练时间: {datetime.datetime.fromtimestamp(self.llm.last_train_time).strftime('%Y-%m-%d %H:%M')}")
+
+    def command_listener(self):
+        """交互式命令控制台"""
+        print(f"\n{Config.APP_NAME} 命令系统 (输入 'help' 查看帮助)")
+        while True:
+            try:
+                cmd = input("> 输入命令: ").strip()
+                if cmd == "help":
+                    self.show_help()
+                elif cmd == "exit":
+                    self.shutdown()
+                    break
                 else:
-                    func(command)
+                    self.handle_user_command(cmd)
+            except EOFError:
+                self.shutdown()
                 break
 
-    def check_commands():
-        speech_command = recognize_speech()
-        if speech_command:
-            process_command(speech_command)
-        text_command = get_text_command()
-        if text_command:
-            process_command(text_command)
-        network_data = network_operation()
-        if network_data:
-            # 这里可以添加对网络数据的处理逻辑
-            logging.info(f"处理网络数据: {network_data}")
-        root.after(1000, check_commands)
+    def show_help(self):
+        """命令帮助"""
+        print("""
+        可用命令:
+        - train now          立即执行模型训练
+        - execute <task>     执行任务（支持 'system:命令' 或 文本生成）
+        - status             查看系统状态
+        - exit               退出程序
+        """)
 
-    root.after(1000, check_commands)
-    root.mainloop()
+    def shutdown(self):
+        """优雅关闭"""
+        self.running = False
+        self.llm.save_model(os.path.join(Config.TEMP_DIR, "shutdown_model"))
+        self.logger.log("程序优雅关闭，模型已保存", "INFO")
+        sys.exit(0)
 
+# ========== 日志系统 ==========
+class Logger:
+    def __init__(self):
+        self.log_file = os.path.join(Config.LOG_DIR, f"{Config.APP_NAME}_{time.strftime('%Y%m%d')}.log")
+        os.makedirs(Config.LOG_DIR, exist_ok=True)
+
+    def log(self, message: str, level="INFO"):
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{timestamp}] [{level}] {message}"
+        print(log_entry)
+        with open(self.log_file, "a") as f:
+            f.write(log_entry + "\n")
+
+# ========== 程序入口 ==========
 if __name__ == "__main__":
-main_loop()
+    gap_time = GapTimeController()
+    gap_time.logger.log(
+        f"{Config.APP_NAME} 启动 (设备: {gap_time.llm.device})",
+        "INFO"
+    )
+    
+    # 启动自主核心
+    gap_time.start_autonomous_mode()
+    
+    # 启动命令控制台
+gap_time.command_listener()
