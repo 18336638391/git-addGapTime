@@ -293,9 +293,3 @@ if __name__ == "__main__":
         f"{Config.APP_NAME} 启动 (设备: {gap_time.llm.device})",
         "INFO"
     )
-    
-    # 启动自主核心
-    gap_time.start_autonomous_mode()
-    
-    # 启动命令控制台
-gap_time.command_listener()
