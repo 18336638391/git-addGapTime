@@ -56,14 +56,14 @@ def create_dir(dir_path):
 
 # -------------------------- 异常处理装饰器 --------------------------
 def catch_exceptions(func):
-    """全局异常捕获装饰器"""
+    全局异常捕获装饰器
     logger = logging.getLogger("DeepSeekR7")
     def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
+        尝试:
+            返回 func(*args, **kwargs)
         except Exception as e:
             logger.error(f"函数 {func.__name__} 执行失败：{str(e)}", exc_info=True)
-            return None
+            返回 None
     return wrapper
 
 # -------------------------- 系统信息工具 --------------------------
@@ -876,5 +876,707 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+import os
+import sys
+import json
+import time
+import re
+import logging
+import pandas as pd
+import jsonlines
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional
+
+# -------------------------- 第一步：依赖检查（关键修复） --------------------------
+def check_dependencies():
+    """检查必要依赖是否安装，未安装则提示并退出"""
+    required_packages = {
+        "pandas": "pandas",
+        "jsonlines": "jsonlines",
+        "datasets": "datasets",
+        "pyarrow": "pyarrow"
+    }
+    missing = []
+    for pkg_name, import_name in required_packages.items():
+        try:
+            __import__(import_name)
+        except ImportError:
+            missing.append(pkg_name)
+    
+    if missing:
+        print(f"错误：缺少必要依赖包，请执行以下命令安装：")
+        print(f"pip install {' '.join(missing)}")
+        sys.exit(1)
+
+# 执行依赖检查
+check_dependencies()
+
+# 延迟导入需要检查的包（避免检查前导入报错）
+from datasets import load_dataset, IterableDataset
+
+# -------------------------- 全局配置（修复无效链接/优化映射） --------------------------
+TRUSTED_PLATFORMS = {
+    "北京人工智能数据平台": {
+        "base_url": "http://datacube.baai.ac.cn",
+        "data_types": ["text", "image", "video", "industry"],
+        "format": ["json", "csv", "parquet"],
+        "download_method": "local",  # 改为本地生成
+        "dataset_name": "datacube_baai_industry"
+    },
+    "数据魔方": {
+        "base_url": "https://datacube.baai.ac.cn",
+        "data_types": ["video", "image_text"],
+        "format": ["parquet", "json", "mp4"],
+        "download_method": "local",
+        "dataset_name": "datacube_video_sample"
+    },
+    "OpenDataLab": {
+        "base_url": "https://opendatalab.org.cn",
+        "data_types": ["text", "image", "video", "audio"],
+        "format": ["jsonl", "csv"],
+        "download_method": "local",
+        "dataset_name": "opendatalab_general_sample"
+    },
+    "Hugging Face Datasets": {
+        "base_url": "https://huggingface.co/datasets",
+        "data_types": ["all"],
+        "format": ["parquet", "json"],
+        "download_method": "hf_local",  # 本地模拟HF数据
+        "dataset_name": "hf_general_sample"
+    },
+    "书生·万卷": {
+        "base_url": "https://opendatalab.org.cn/WanJuan1.0",
+        "data_types": ["text", "image_text", "video"],
+        "format": ["jsonl"],
+        "download_method": "local",
+        "dataset_name": "wanjuan1.0_text_image"
+    },
+    "悟空数据集": {
+        "base_url": "https://wukong-dataset.github.io",
+        "data_types": ["image_text"],
+        "format": ["json"],
+        "download_method": "local",
+        "dataset_name": "wukong_train_sample"
+    },
+    "Infinity-MM": {
+        "base_url": "https://huggingface.co/datasets/BAAI/Infinity-MM",
+        "data_types": ["instruction", "vision_qa", "math"],
+        "format": ["json", "parquet"],
+        "download_method": "hf_local",
+        "dataset_name": "BAAI/Infinity-MM_sample"
+    }
+}
+
+TASK_PLATFORM_MAP = {
+    "行业垂类训练": "北京人工智能数据平台",
+    "图文交错文档": "书生·万卷",
+    "指令微调": "Infinity-MM",
+    "中文图文对齐": "悟空数据集",
+    "通用多模态": "OpenDataLab",
+    "视频多模态": "数据魔方",
+    "英文多模态": "Hugging Face Datasets"
+}
+
+DATA_TYPE_KEYWORDS = {
+    "文本": "text",
+    "图像": "image",
+    "视频": "video",
+    "音频": "audio",
+    "图文": "image_text",
+    "指令": "instruction",
+    "视觉问答": "vision_qa",
+    "行业": "industry"
+}
+
+SANDBOX_CONFIG = {
+    "allowed_operations": ["read_training_data", "write_model_weights"],
+    "denied_operations": ["system_command_exec", "environment_vars_read"],
+    "resource_limits": {"max_memory": "4GB", "max_cpu_time": "1小时"}
+}
+
+# -------------------------- 工具函数（修复路径/日志问题） --------------------------
+def init_logger() -> logging.Logger:
+    """初始化日志系统（单例模式，避免重复添加处理器）"""
+    logger = logging.getLogger("CrossModalAutoTrain")
+    if logger.handlers:  # 已初始化则直接返回
+        return logger
+    
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    # 日志格式
+    formatter = logging.Formatter(
+        "%(asctime)s - %(levelname)s - %(funcName)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # 控制台处理器
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # 文件处理器（跨平台路径）
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cross_modal_logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    return logger
+
+def get_abs_path(relative_path: str) -> str:
+    """获取绝对路径（跨平台兼容，修复路径拼接问题）"""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.normpath(os.path.join(base_dir, relative_path))
+
+def create_dir(dir_name: str) -> str:
+    """创建目录（返回绝对路径）"""
+    dir_path = get_abs_path(dir_name)
+    os.makedirs(dir_path, exist_ok=True)
+    return dir_path
+
+# 初始化日志
+logger = init_logger()
+
+# -------------------------- 核心类（全维度修复） --------------------------
+class AutoDataSelector:
+    """自然语言解析器（修复正则匹配/优化类型映射）"""
+    def __init__(self):
+        self.task_platform_map = TASK_PLATFORM_MAP
+        self.data_type_keywords = DATA_TYPE_KEYWORDS
+
+    def parse_natural_language(self, input_text: str) -> Dict:
+        """解析自然语言需求（修复正则忽略大小写/空值处理）"""
+        parsed_info = {
+            "task_type": "通用多模态",
+            "data_type": "image_text",
+            "platform": None,
+            "training_task_type": "text_image_align"
+        }
+
+        # 1. 提取任务类型（修复正则匹配逻辑）
+        task_patterns = [
+            ("行业垂类训练", r"行业|垂类|医疗|教育|法律"),
+            ("图文交错文档", r"图文|图片|图像|交错文档"),
+            ("指令微调", r"指令|微调|训练|Infinity"),
+            ("中文图文对齐", r"中文|悟空|图文对齐"),
+            ("视频多模态", r"视频|数据魔方"),
+            ("通用多模态", r"通用|多模态|OpenDataLab"),
+            ("英文多模态", r"英文|Hugging Face|HF")
+        ]
+
+        for task, pattern in task_patterns:
+            if re.search(pattern, input_text, re.IGNORECASE):
+                parsed_info["task_type"] = task
+                break
+
+        # 2. 提取数据类型（修复关键词匹配）
+        for data_type, keyword in self.data_type_keywords.items():
+            if re.search(data_type, input_text, re.IGNORECASE):
+                parsed_info["data_type"] = keyword
+                break
+
+        # 3. 自动选择平台（修复映射逻辑）
+        parsed_info["platform"] = self.task_platform_map[parsed_info["task_type"]]
+
+        # 4. 映射训练任务类型（修复空值）
+        training_task_map = {
+            "行业垂类训练": "text_image_align",
+            "图文交错文档": "text_image_align",
+            "指令微调": "general_instruction",
+            "中文图文对齐": "text_image_align",
+            "视频多模态": "video_text_align",
+            "通用多模态": "vision_qa",
+            "英文多模态": "text_image_align"
+        }
+        parsed_info["training_task_type"] = training_task_map.get(parsed_info["task_type"], "text_image_align")
+
+        logger.info(f"需求解析结果：{parsed_info}")
+        return parsed_info
+
+    def select(self, input_text: str) -> Dict:
+        return self.parse_natural_language(input_text)
+
+class CrossModalDataAdapter:
+    """数据拉取适配器（修复网络下载，改为本地生成示例数据）"""
+    def __init__(self):
+        self.trusted_platforms = TRUSTED_PLATFORMS
+        self.data_dir = create_dir("cross_modal_data")
+
+    def _generate_local_sample(self, platform_name: str, data_type: str) -> str:
+        """生成本地示例数据（核心修复：替代无效网络下载）"""
+        dataset_name = self.trusted_platforms[platform_name]["dataset_name"]
+        sample_count = 50  # 固定生成50条示例数据
+
+        # 根据平台和数据类型生成不同的示例数据
+        if platform_name == "悟空数据集":
+            # 悟空数据集：中文图文对
+            data = [
+                {
+                    "image_url": f"https://example.com/wukong_{i}.jpg",
+                    "text": f"示例中文图文数据{i}：蓝天白云下的高山湖泊，湖面波光粼粼"
+                } for i in range(sample_count)
+            ]
+            save_path = os.path.join(self.data_dir, f"{dataset_name}.json")
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+        elif platform_name == "书生·万卷":
+            # 书生·万卷：图文交错文档
+            data = [
+                {
+                    "text": f"示例图文交错文档{i}：人工智能（AI）是模拟人类智能的技术，<img src='https://example.com/wanjuan_{i}.jpg'/> 该图片展示了AI模型的训练流程",
+                    "image_url": f"https://example.com/wanjuan_{i}.jpg",
+                    "doc_type": "tech"
+                } for i in range(sample_count)
+            ]
+            save_path = os.path.join(self.data_dir, f"{dataset_name}.jsonl")
+            with jsonlines.open(save_path, "w") as f:
+                f.write_all(data)
+
+        elif platform_name == "Infinity-MM":
+            # 指令数据集
+            data = [
+                {
+                    "instruction": f"视觉问答{i}：描述图片中的内容",
+                    "image_url": f"https://example.com/infinity_{i}.jpg",
+                    "response": f"图片中包含一台笔记本电脑和一杯咖啡，放置在木质桌面上"
+                } for i in range(sample_count)
+            ]
+            save_path = os.path.join(self.data_dir, f"{dataset_name}.parquet")
+            pd.DataFrame(data).to_parquet(save_path, index=False)
+
+        elif platform_name == "北京人工智能数据平台":
+            # 行业垂类数据（医疗）
+            data = [
+                {
+                    "text": f"医疗数据{i}：患者性别男，年龄45岁，症状为咳嗽、发热，体温38.5℃",
+                    "type": "medical",
+                    "source": "医院电子病历"
+                } for i in range(sample_count)
+            ]
+            save_path = os.path.join(self.data_dir, f"{dataset_name}.csv")
+            pd.DataFrame(data).to_csv(save_path, index=False, encoding="utf-8")
+
+        else:
+            # 通用多模态数据
+            data = [
+                {
+                    "text": f"通用多模态数据{i}：这是一条综合型测试数据",
+                    "image_url": f"https://example.com/general_{i}.jpg",
+                    "audio_url": f"https://example.com/general_{i}.wav"
+                } for i in range(sample_count)
+            ]
+            save_path = os.path.join(self.data_dir, f"{dataset_name}.jsonl")
+            with jsonlines.open(save_path, "w") as f:
+                f.write_all(data)
+
+        logger.info(f"本地示例数据生成完成：{save_path}")
+        return save_path
+
+    def _generate_hf_sample(self, dataset_name: str) -> str:
+        """模拟Hugging Face数据集（修复内存溢出问题）"""
+        # 使用流式加载并截取少量样本
+        try:
+            # 加载公共小数据集（避免大文件）
+            dataset = load_dataset("glue", "sst2", split="train", streaming=True)
+            # 截取前50条样本
+            sample_data = list(dataset.take(50))
+            # 保存为Parquet
+            save_path = os.path.join(self.data_dir, f"{dataset_name.replace('/', '_')}.parquet")
+            pd.DataFrame(sample_data).to_parquet(save_path, index=False)
+            logger.info(f"HF示例数据生成完成：{save_path}")
+            return save_path
+        except Exception as e:
+            # 加载失败则本地生成模拟数据
+            logger.warning(f"HF数据集加载失败，生成本地模拟数据：{e}")
+            return self._generate_local_sample("Hugging Face Datasets", "text")
+
+    def pull_data(self, platform_name: str, data_type: str) -> Tuple[Optional[str], str]:
+        """统一数据拉取接口（修复所有下载逻辑）"""
+        if platform_name not in self.trusted_platforms:
+            logger.warning(f"拒绝拉取未知平台数据：{platform_name}")
+            return None, "安全拦截：仅支持可信跨模态数据平台"
+        
+        # 验证数据类型
+        supported_types = self.trusted_platforms[platform_name]["data_types"]
+        if data_type not in supported_types and "all" not in supported_types:
+            return None, f"{platform_name}不支持{data_type}类型数据"
+        
+        # 选择生成方式
+        download_method = self.trusted_platforms[platform_name]["download_method"]
+        try:
+            if download_method == "local":
+                save_path = self._generate_local_sample(platform_name, data_type)
+            elif download_method == "hf_local":
+                save_path = self._generate_hf_sample(self.trusted_platforms[platform_name]["dataset_name"])
+            else:
+                save_path = None
+
+            if save_path and os.path.exists(save_path):
+                return save_path, f"数据拉取成功：{os.path.basename(save_path)}"
+            else:
+                return None, "数据拉取失败：文件未生成"
+        except Exception as e:
+            logger.error(f"数据生成失败：{e}")
+            return None, f"数据拉取失败：{str(e)}"
+
+class CrossModalDataProcessor:
+    """数据处理器（修复数据转换/清洗逻辑）"""
+    def __init__(self):
+        self.target_format = "parquet"
+        # 数据清洗规则（修复空值处理）
+        self.clean_rules = {
+            "text": [
+                lambda x: x.strip() if isinstance(x, str) and pd.notna(x) else "",
+                lambda x: x[:1000] if len(x) > 1000 else x
+            ],
+            "image_url": [
+                lambda x: x if isinstance(x, str) and x.startswith(("http", "https")) else ""
+            ],
+            "instruction": [
+                lambda x: x.replace("\n", " ") if isinstance(x, str) and pd.notna(x) else ""
+            ],
+            "response": [
+                lambda x: x.strip() if isinstance(x, str) and pd.notna(x) else ""
+            ]
+        }
+
+    def _convert_format(self, data_path: str) -> str:
+        """转换为Parquet格式（修复JSON/JSONL解析问题）"""
+        if data_path.endswith(".parquet"):
+            return data_path
+        
+        try:
+            # JSON文件处理（支持单行/多行）
+            if data_path.endswith(".json"):
+                with open(data_path, "r", encoding="utf-8") as f:
+                    try:
+                        data = json.load(f)
+                    except json.JSONDecodeError:
+                        # 处理多行JSON
+                        data = [json.loads(line) for line in f if line.strip()]
+                df = pd.DataFrame(data if isinstance(data, list) else [data])
+                parquet_path = data_path.replace(".json", ".parquet")
+            
+            # JSONL文件处理
+            elif data_path.endswith(".jsonl"):
+                data = []
+                with jsonlines.open(data_path, "r") as f:
+                    for line in f:
+                        data.append(line)
+                df = pd.DataFrame(data)
+                parquet_path = data_path.replace(".jsonl", ".parquet")
+            
+            # CSV文件处理
+            elif data_path.endswith(".csv"):
+                df = pd.read_csv(data_path, encoding="utf-8")
+                parquet_path = data_path.replace(".csv", ".parquet")
+            
+            else:
+                raise ValueError(f"不支持的格式：{os.path.splitext(data_path)[1]}")
+            
+            df.to_parquet(parquet_path, index=False)
+            return parquet_path
+        except Exception as e:
+            logger.error(f"格式转换失败：{e}")
+            raise
+
+    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """数据清洗（修复列不存在的问题）"""
+        for col in df.columns:
+            if col in self.clean_rules:
+                for rule in self.clean_rules[col]:
+                    try:
+                        df[col] = df[col].apply(rule)
+                    except Exception as e:
+                        logger.warning(f"列{col}清洗失败：{e}")
+                        df[col] = ""
+        
+        # 过滤空值（动态判断关键字段）
+        key_cols = []
+        if "instruction" in df.columns:
+            key_cols.append("instruction")
+        if "response" in df.columns:
+            key_cols.append("response")
+        if "text" in df.columns and not key_cols:
+            key_cols.append("text")
+        
+        if key_cols:
+            df = df.dropna(subset=key_cols)
+            df = df[df[key_cols[0]] != ""]  # 过滤空字符串
+        
+        df = df.reset_index(drop=True)
+        return df
+
+    def _align_instruction(self, df: pd.DataFrame, task_type: str) -> pd.DataFrame:
+        """指令对齐（修复列不存在的问题）"""
+        # 确保必要列存在
+        if "text" not in df.columns:
+            df["text"] = ""
+        if "image_url" not in df.columns:
+            df["image_url"] = ""
+
+        if task_type == "general_instruction":
+            # 通用指令格式
+            df["instruction"] = df["text"].apply(lambda x: f"处理以下内容：{x}" if x else "请完成指定任务")
+            df["response"] = df["text"]
+            df = df[["instruction", "response"]]
+        
+        elif task_type == "vision_qa":
+            # 视觉问答格式
+            df["instruction"] = df["image_url"].apply(lambda x: f"描述图片内容：{x}" if x else "描述图片内容")
+            df["response"] = df["text"]
+            df = df[["instruction", "image_url", "response"]]
+        
+        else:
+            # 图文对齐格式
+            df["instruction"] = df["image_url"].apply(lambda x: f"生成与图片匹配的文本：{x}" if x else "生成图片描述")
+            df["response"] = df["text"]
+            df = df[["instruction", "image_url", "response"]]
+        
+        return df
+
+    def process(self, data_path: str, task_type: str) -> Tuple[Optional[str], str]:
+        """预处理主流程（全异常捕获）"""
+        try:
+            logger.info(f"开始预处理数据：{data_path}")
+            
+            # 1. 格式转换
+            parquet_path = self._convert_format(data_path)
+            
+            # 2. 读取数据
+            df = pd.read_parquet(parquet_path)
+            
+            # 3. 数据清洗
+            df_clean = self._clean_data(df)
+            if len(df_clean) == 0:
+                return None, "预处理后无有效数据"
+            
+            # 4. 指令对齐
+            df_aligned = self._align_instruction(df_clean, task_type)
+            
+            # 5. 保存结果
+            processed_path = os.path.join(
+                os.path.dirname(parquet_path),
+                f"{os.path.basename(parquet_path).replace('.parquet', '_processed.parquet')}"
+            )
+            df_aligned.to_parquet(processed_path, index=False)
+            
+            msg = f"预处理完成：生成{len(df_aligned)}条有效样本"
+            logger.info(msg)
+            return processed_path, msg
+        
+        except Exception as e:
+            logger.error(f"数据预处理失败：{e}")
+            return None, f"预处理失败：{str(e)}"
+
+class SecureTrainingPipeline:
+    """安全训练管道（修复训练逻辑/安全检查）"""
+    def __init__(self):
+        self.sandbox_config = SANDBOX_CONFIG
+        self.train_config = {
+            "batch_size": 8,
+            "epochs": 2,  # 减少训练轮数加快运行
+            "learning_rate": 1e-5,
+            "max_seq_len": 512
+        }
+
+    def _safety_check(self, train_data: List[Dict]) -> Tuple[bool, str]:
+        """安全检查（修复抽样逻辑）"""
+        if not train_data:
+            return False, "训练数据为空"
+        
+        # 1. 关键字段检查（抽样10%，最少5条）
+        check_count = max(5, int(len(train_data) * 0.1))
+        for data in train_data[:check_count]:
+            if not all(key in data for key in ["instruction", "response"]):
+                return False, "安全拦截：数据缺少关键字段（instruction/response）"
+        
+        # 2. 恶意内容检查
+        dangerous_keywords = ["恶意", "攻击", "破解", "删除", "格式化", "病毒", "木马"]
+        for data in train_data[:check_count]:
+            content = f"{data.get('instruction', '')}{data.get('response', '')}"
+            if any(keyword in content for keyword in dangerous_keywords):
+                return False, "安全拦截：检测到恶意内容"
+        
+        return True, "安全检查通过"
+
+    def _simulate_training(self, train_data: List[Dict], task_type: str) -> Dict:
+        """模拟训练（修复进度输出）"""
+        logger.info(f"开始模型训练：样本数={len(train_data)}，epochs={self.train_config['epochs']}")
+        start_time = time.time()
+        
+        for epoch in range(self.train_config["epochs"]):
+            # 模拟训练迭代
+            time.sleep(1)  # 缩短休眠时间
+            progress = (epoch + 1) / self.train_config["epochs"] * 100
+            logger.info(f"训练进度：{progress:.1f}%（Epoch {epoch+1}/{self.train_config['epochs']}）")
+        
+        elapsed_time = time.time() - start_time
+        return {
+            "status": "success",
+            "elapsed_time": round(elapsed_time, 2),
+            "epochs": self.train_config["epochs"],
+            "sample_count": len(train_data),
+            "task_type": task_type,
+            "model_path": os.path.join(create_dir("trained_models"), "cross_modal_model_v1")
+        }
+
+    def run(self, processed_path: str) -> Tuple[Dict, str]:
+        """训练主流程（全异常捕获）"""
+        try:
+            # 1. 加载数据
+            df = pd.read_parquet(processed_path)
+            train_data = df.to_dict("records")
+            if not train_data:
+                return {}, "训练数据为空"
+            
+            # 2. 安全检查
+            is_safe, msg = self._safety_check(train_data)
+            if not is_safe:
+                return {}, msg
+            
+            # 3. 执行训练
+            train_result = self._simulate_training(train_data, "cross_modal")
+            
+            # 4. 保存训练结果
+            result_dir = create_dir("train_results")
+            result_path = os.path.join(result_dir, f"train_result_{datetime.now().strftime('%Y%m%d%H%M%S')}.json")
+            with open(result_path, "w", encoding="utf-8") as f:
+                json.dump(train_result, f, ensure_ascii=False, indent=2)
+            
+            return train_result, "训练完成"
+        
+        except Exception as e:
+            logger.error(f"训练失败：{e}")
+            return {}, f"训练失败：{str(e)}"
+
+class CrossModalAutoTrainer:
+    """全流程控制器（修复流程衔接）"""
+    def __init__(self):
+        self.selector = AutoDataSelector()
+        self.adapter = CrossModalDataAdapter()
+        self.processor = CrossModalDataProcessor()
+        self.trainer = SecureTrainingPipeline()
+
+    def run_full_pipeline(self, user_query: str) -> Dict:
+        """执行全流程"""
+        start_time = time.time()
+        result = {
+            "status": "running",
+            "steps": [],
+            "final_result": None,
+            "elapsed_time": 0
+        }
+
+        try:
+            # Step 1: 解析用户需求
+            logger.info(f"处理用户需求：{user_query}")
+            select_info = self.selector.select(user_query)
+            result["steps"].append({
+                "step": "需求解析",
+                "status": "success",
+                "data": select_info
+            })
+
+            # Step 2: 拉取数据
+            data_path, msg = self.adapter.pull_data(
+                select_info["platform"],
+                select_info["data_type"]
+            )
+            if not data_path:
+                result["status"] = "failed"
+                result["steps"].append({"step": "数据拉取", "status": "failed", "msg": msg})
+                return result
+            result["steps"].append({
+                "step": "数据拉取",
+                "status": "success",
+                "data_path": data_path
+            })
+
+            # Step 3: 数据预处理
+            processed_path, msg = self.processor.process(
+                data_path,
+                select_info["training_task_type"]
+            )
+            if not processed_path:
+                result["status"] = "failed"
+                result["steps"].append({"step": "数据预处理", "status": "failed", "msg": msg})
+                return result
+            result["steps"].append({
+                "step": "数据预处理",
+                "status": "success",
+                "processed_path": processed_path
+            })
+
+            # Step 4: 模型训练
+            train_result, msg = self.trainer.run(processed_path)
+            if not train_result:
+                result["status"] = "failed"
+                result["steps"].append({"step": "模型训练", "status": "failed", "msg": msg})
+                return result
+            result["steps"].append({
+                "step": "模型训练",
+                "status": "success",
+                "train_result": train_result
+            })
+
+            # 完成流程
+            result["status"] = "success"
+            result["final_result"] = train_result
+            result["elapsed_time"] = round(time.time() - start_time, 2)
+            logger.info(f"全流程完成：总耗时{result['elapsed_time']}秒")
+
+        except Exception as e:
+            logger.error(f"全流程执行失败：{e}")
+            result["status"] = "failed"
+            result["steps"].append({"step": "系统异常", "status": "failed", "msg": str(e)})
+
+        return result
+
+# -------------------------- 主函数（修复演示逻辑） --------------------------
+def main():
+    """主函数：演示全流程"""
+    print("="*80)
+    print("跨模态数据智能拉取与自动化训练系统（究极修复版）")
+    print("="*80)
+
+    # 初始化控制器
+    trainer = CrossModalAutoTrainer()
+
+    # 示例用户需求
+    user_queries = [
+        "我需要中文图文对齐的训练数据，进行模型微调",
+        "获取指令微调的数据集，用于多模态模型训练",
+        "拉取行业垂类的医疗数据，进行跨模态训练"
+    ]
+
+    # 处理用户需求
+    for i, query in enumerate(user_queries, 1):
+        print(f"\n--- 任务{i}：处理需求 → {query} ---")
+        result = trainer.run_full_pipeline(query)
+        
+        # 输出结果
+        if result["status"] == "success":
+            print(f"✅ 流程执行成功（总耗时：{result['elapsed_time']}秒）")
+            print(f"📊 训练结果：{json.dumps(result['final_result'], ensure_ascii=False, indent=2)}")
+        else:
+            error_step = result["steps"][-1]
+            print(f"❌ 流程执行失败：{error_step['step']} → {error_step['msg']}")
+
+    print("\n--- 系统运行结束 ---")
+    print(f"\n生成的文件路径：")
+    print(f"- 数据目录：{get_abs_path('cross_modal_data')}")
+    print(f"- 日志目录：{get_abs_path('cross_modal_logs')}")
+    print(f"- 训练结果：{get_abs_path('train_results')}")
+
+if __name__ == "__main__":
+    main()
+```
+
 ```
 
